@@ -15,7 +15,8 @@ object DynamoDBStreamClient {
   val BatchGetItemMaxSize   = 10
   val BatchWriteItemMaxSize = 15
 }
-class DynamoDBStreamClient(client: DynamoDbAsyncClient) {
+
+final class DynamoDBStreamClient(client: DynamoDbAsyncClient) {
   import DynamoDBStreamClient._
 
   def putItemSource(request: PutItemRequest): Source[PutItemResponse, NotUsed] =
@@ -75,7 +76,9 @@ class DynamoDBStreamClient(client: DynamoDbAsyncClient) {
       )
       .asScala
 
-  private def internalAwareBatchGetItemFlow =
+  private def internalAwareBatchGetItemFlow(
+      shardSize: Int
+  ): Flow[BatchGetItemRequest, BatchGetItemResponse, NotUsed] =
     Flow[BatchGetItemRequest].flatMapConcat { request =>
       if (
         request.requestItems().asScala.exists {
@@ -83,7 +86,7 @@ class DynamoDBStreamClient(client: DynamoDbAsyncClient) {
         }
       ) {
         Source(request.requestItems().asScala.toMap)
-          .groupBy(Int.MaxValue, { case (_, v) => math.abs(v.##) })
+          .groupBy(shardSize, { case (_, v) => math.abs(v.##) % shardSize })
           .mapConcat {
             case (k, v) =>
               v.keys.asScala.toVector.map((k, _))
@@ -102,29 +105,35 @@ class DynamoDBStreamClient(client: DynamoDbAsyncClient) {
         Source.single(request).via(internalBatchGetItemFlow)
     }
 
-  def batchGetItemSource(request: BatchGetItemRequest): Source[BatchGetItemResponse, NotUsed] =
-    Source.single(request).via(batchGetItemFlow)
+  def batchGetItemSource(
+      request: BatchGetItemRequest,
+      shardSize: Int = Int.MaxValue
+  ): Source[BatchGetItemResponse, NotUsed] =
+    Source.single(request).via(batchGetItemFlow(shardSize))
 
-  def batchGetItemFlow: Flow[BatchGetItemRequest, BatchGetItemResponse, NotUsed] = {
+  def batchGetItemFlow(
+      shardSize: Int = Int.MaxValue
+  ): Flow[BatchGetItemRequest, BatchGetItemResponse, NotUsed] = {
     def loop(
         acc: Source[BatchGetItemResponse, NotUsed]
     ): Flow[BatchGetItemRequest, BatchGetItemResponse, NotUsed] =
       Flow[BatchGetItemRequest].flatMapConcat { request =>
-        Source.single(request).via(internalAwareBatchGetItemFlow).flatMapConcat { response =>
-          val unprocessedKeys = Option(
-            response
-              .unprocessedKeys()
-          ).map(_.asScala.toMap).getOrElse(Map.empty)
-          if (response.hasUnprocessedKeys && unprocessedKeys.nonEmpty) {
-            val nextRequest =
-              request.toBuilder
-                .requestItems(unprocessedKeys.asJava)
-                .build()
-            Source
-              .single(nextRequest)
-              .via(loop(Source.combine(acc, Source.single(response))(Concat(_))))
-          } else
-            Source.combine(acc, Source.single(response))(Concat(_))
+        Source.single(request).via(internalAwareBatchGetItemFlow(shardSize)).flatMapConcat {
+          response =>
+            val unprocessedKeys = Option(
+              response
+                .unprocessedKeys()
+            ).map(_.asScala.toMap).getOrElse(Map.empty)
+            if (response.hasUnprocessedKeys && unprocessedKeys.nonEmpty) {
+              val nextRequest =
+                request.toBuilder
+                  .requestItems(unprocessedKeys.asJava)
+                  .build()
+              Source
+                .single(nextRequest)
+                .via(loop(Source.combine(acc, Source.single(response))(Concat(_))))
+            } else
+              Source.combine(acc, Source.single(response))(Concat(_))
         }
       }
     loop(Source.empty)
@@ -145,8 +154,9 @@ class DynamoDBStreamClient(client: DynamoDbAsyncClient) {
       )
       .asScala
 
-  private def internalAwareBatchWriteItemFlow
-      : Flow[BatchWriteItemRequest, BatchWriteItemResponse, NotUsed] = {
+  private def internalAwareBatchWriteItemFlow(
+      shardSize: Int
+  ): Flow[BatchWriteItemRequest, BatchWriteItemResponse, NotUsed] = {
     Flow[BatchWriteItemRequest].flatMapConcat { request =>
       if (
         request.requestItems().asScala.exists {
@@ -154,7 +164,7 @@ class DynamoDBStreamClient(client: DynamoDbAsyncClient) {
         }
       ) {
         Source(request.requestItems().asScala.toMap)
-          .groupBy(Int.MaxValue, { case (_, v) => math.abs(v.##) })
+          .groupBy(shardSize, { case (_, v) => math.abs(v.##) % shardSize })
           .mapConcat { case (k, v) => v.asScala.toVector.map((k, _)) }
           .grouped(BatchWriteItemMaxSize)
           .map { items =>
@@ -170,34 +180,38 @@ class DynamoDBStreamClient(client: DynamoDbAsyncClient) {
   }
 
   def batchWriteItemSource(
-      request: BatchWriteItemRequest
+      request: BatchWriteItemRequest,
+      shardSize: Int = Int.MaxValue
   ): Source[BatchWriteItemResponse, NotUsed] =
-    Source.single(request).via(batchWriteItemFlow)
+    Source.single(request).via(batchWriteItemFlow(shardSize))
 
-  def batchWriteItemFlow: Flow[BatchWriteItemRequest, BatchWriteItemResponse, NotUsed] = {
+  def batchWriteItemFlow(
+      shardSize: Int = Int.MaxValue
+  ): Flow[BatchWriteItemRequest, BatchWriteItemResponse, NotUsed] = {
     def loop(
         acc: Source[BatchWriteItemResponse, NotUsed]
     ): Flow[BatchWriteItemRequest, BatchWriteItemResponse, NotUsed] =
       Flow[BatchWriteItemRequest].flatMapConcat { request =>
-        Source.single(request).via(internalAwareBatchWriteItemFlow).flatMapConcat { response =>
-          val unprocessedItems = Option(
-            response
-              .unprocessedItems()
-          ).map(_.asScala.toMap)
-            .map(_.map {
-              case (k, v) => (k, v.asScala.toVector)
-            })
-            .getOrElse(Map.empty)
-          if (response.hasUnprocessedItems && unprocessedItems.nonEmpty) {
-            val nextRequest =
-              request.toBuilder
-                .requestItems(unprocessedItems.map { case (k, v) => (k, v.asJava) }.asJava)
-                .build()
-            Source
-              .single(nextRequest)
-              .via(loop(Source.combine(acc, Source.single(response))(Concat(_))))
-          } else
-            Source.combine(acc, Source.single(response))(Concat(_))
+        Source.single(request).via(internalAwareBatchWriteItemFlow(shardSize)).flatMapConcat {
+          response =>
+            val unprocessedItems = Option(
+              response
+                .unprocessedItems()
+            ).map(_.asScala.toMap)
+              .map(_.map {
+                case (k, v) => (k, v.asScala.toVector)
+              })
+              .getOrElse(Map.empty)
+            if (response.hasUnprocessedItems && unprocessedItems.nonEmpty) {
+              val nextRequest =
+                request.toBuilder
+                  .requestItems(unprocessedItems.map { case (k, v) => (k, v.asJava) }.asJava)
+                  .build()
+              Source
+                .single(nextRequest)
+                .via(loop(Source.combine(acc, Source.single(response))(Concat(_))))
+            } else
+              Source.combine(acc, Source.single(response))(Concat(_))
         }
       }
     loop(Source.empty)
