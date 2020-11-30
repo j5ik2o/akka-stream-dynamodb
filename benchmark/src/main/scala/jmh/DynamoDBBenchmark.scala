@@ -165,8 +165,7 @@ class DynamoDBBenchmark extends DynamoDBContainerHelper {
           val f = client
             .batchGetItem(request)
             .thenApply(_ => ())
-          future.thenCompose(_ => f)
-          loop(t, f)
+          loop(t, future.thenCompose(_ => f))
       }
     }
     loop(input, CompletableFuture.completedFuture(())).join()
@@ -427,8 +426,7 @@ class DynamoDBBenchmark extends DynamoDBContainerHelper {
                 .build()
             )
             .thenApply(_ => ())
-          future.thenCompose(_ => f)
-          loop(t, f)
+          loop(t, future.thenCompose(_ => f))
       }
     }
     loop(input, CompletableFuture.completedFuture(())).join()
@@ -535,8 +533,7 @@ class DynamoDBBenchmark extends DynamoDBContainerHelper {
                 .build()
             )
             .thenApply(_ => ())
-          future.thenCompose(_ => f)
-          loop(t, f)
+          loop(t, future.thenCompose(_ => f))
       }
     }
     loop(input, CompletableFuture.completedFuture(())).join()
