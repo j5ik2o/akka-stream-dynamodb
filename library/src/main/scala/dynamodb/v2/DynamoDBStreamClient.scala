@@ -148,7 +148,7 @@ final class DynamoDBStreamClient(
         }
       ) {
         Source(request.requestItems().asScala.toMap)
-          .groupBy(shardSize, { case (_, v) => math.abs(v.##) % shardSize })
+          .groupBy(shardSize, { case (k, _) => math.abs(k.##) % shardSize })
           .mapConcat {
             case (k, v) =>
               v.keys.asScala.toVector.map((k, _))
@@ -158,7 +158,6 @@ final class DynamoDBStreamClient(
             val tableName = items.head._1
             val keys      = items.map(_._2)
             val params    = KeysAndAttributes.builder().keys(keys.asJava).build()
-
             request.toBuilder.requestItems(Map(tableName -> params).asJava).build()
           }
           .via(internalBatchGetItemFlow)
@@ -239,7 +238,7 @@ final class DynamoDBStreamClient(
         }
       ) {
         Source(request.requestItems().asScala.toMap)
-          .groupBy(shardSize, { case (_, v) => math.abs(v.##) % shardSize })
+          .groupBy(shardSize, { case (k, v) => math.abs(k.##) % shardSize })
           .mapConcat { case (k, v) => v.asScala.toVector.map((k, _)) }
           .grouped(BatchWriteItemMaxSize)
           .map { items =>

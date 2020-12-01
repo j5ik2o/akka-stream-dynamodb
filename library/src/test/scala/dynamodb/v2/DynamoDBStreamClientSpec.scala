@@ -2,8 +2,9 @@ package dynamodb.v2
 
 import java.net.URI
 
+import akka.{Done, NotUsed}
 import akka.actor.ActorSystem
-import akka.stream.scaladsl.Sink
+import akka.stream.scaladsl.{Flow, Keep, RunnableGraph, Sink, Source}
 import akka.testkit.TestKit
 import org.scalatest.concurrent.ScalaFutures
 import org.scalatest.freespec.AnyFreeSpecLike
@@ -11,6 +12,7 @@ import software.amazon.awssdk.auth.credentials.{AwsBasicCredentials, StaticCrede
 import software.amazon.awssdk.services.dynamodb.DynamoDbAsyncClient
 import software.amazon.awssdk.services.dynamodb.model.{KeysAndAttributes, _}
 
+import scala.concurrent.{Await, Future}
 import scala.concurrent.duration._
 import scala.jdk.CollectionConverters._
 

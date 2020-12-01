@@ -16,6 +16,235 @@ import scala.concurrent.Await
 import scala.concurrent.duration.Duration
 import scala.jdk.CollectionConverters._
 
+trait MultiTestCase { this: DynamoDBBenchmark =>
+
+  @Benchmark
+  def batchGetItem_multi_javaClient(): Unit = {
+    val keys: List[Map[String, AttributeValue]] =
+      (for (i <- 1 to batchGetItemTotalSize)
+        yield Map(
+          "pkey" -> AttributeValue.builder().s(s"batch-get-item-$i").build(),
+          "skey" -> AttributeValue.builder().s(i.toString).build()
+        )).toList
+    val input = Map("table1" -> keys, "table2" -> keys)
+    def loop(
+        map: Map[String, List[Map[String, AttributeValue]]],
+        future: CompletableFuture[Unit]
+    ): CompletableFuture[Unit] = {
+      map.filterNot { case (_, v) => v.isEmpty } match {
+        case m if m.isEmpty => future
+        case l =>
+          val nm = l.map {
+            case (key, values) =>
+              val (h, t) =
+                values.splitAt(DynamoDBStreamClient.BatchGetItemMaxSize / l.keys.size)
+              key -> (h, t)
+          }
+          val ri = nm.map {
+            case (k, (v, _)) =>
+              val nv = KeysAndAttributes
+                .builder()
+                .keys(v.map(_.asJava).asJava)
+                .build()
+              (k, nv)
+          }.asJava
+          val t = nm.map { case (k, (_, v)) => (k, v) }
+          val request =
+            BatchGetItemRequest
+              .builder()
+              .requestItems(ri)
+              .build()
+          val f: CompletableFuture[Unit] = client
+            .batchGetItem(request)
+            .thenApply(_ => ())
+          future.thenCompose(_ => f)
+          loop(t, f)
+      }
+    }
+    loop(input, CompletableFuture.completedFuture(())).join()
+  }
+
+  @Benchmark
+  def batchGetItem_multi_akka_javaFlow(): Unit = {
+    implicit val s = system
+    val keys =
+      for (i <- 1 to batchGetItemTotalSize)
+        yield Map(
+          "pkey" -> AttributeValue.builder().s(s"batch-get-item-$i").build(),
+          "skey" -> AttributeValue.builder().s(i.toString).build()
+        )
+    val keysAndAttributes = KeysAndAttributes
+      .builder()
+      .keys(keys.map(_.asJava).asJava)
+      .build()
+    val input = Map("table1" -> keysAndAttributes, "table2" -> keysAndAttributes).asJava
+    val request =
+      BatchGetItemRequest
+        .builder()
+        .requestItems(input)
+        .build()
+    val future = streamClientForJava.batchGetItemSource(request).runWith(Sink.seq)
+    Await.result(future, Duration.Inf)
+  }
+
+  @Benchmark
+  def batchGetItem_multi_akka_javaFlow_publisher(): Unit = {
+    implicit val s = system
+    val keys =
+      for (i <- 1 to batchGetItemTotalSize)
+        yield Map(
+          "pkey" -> AttributeValue.builder().s(s"batch-get-item-$i").build(),
+          "skey" -> AttributeValue.builder().s(i.toString).build()
+        )
+    val keysAndAttributes = KeysAndAttributes
+      .builder()
+      .keys(keys.map(_.asJava).asJava)
+      .build()
+    val input = Map("table1" -> keysAndAttributes, "table2" -> keysAndAttributes).asJava
+    val request =
+      BatchGetItemRequest
+        .builder()
+        .requestItems(input)
+        .build()
+    val future = streamClientForJavaWithPublisher.batchGetItemSource(request).runWith(Sink.seq)
+    Await.result(future, Duration.Inf)
+  }
+  @Benchmark
+  def batchGetItem_multi_akka_compatFlow(): Unit = {
+    implicit val s = system
+    val keys =
+      for (i <- 1 to batchGetItemTotalSize)
+        yield Map(
+          "pkey" -> AttributeValue.builder().s(s"batch-get-item-$i").build(),
+          "skey" -> AttributeValue.builder().s(i.toString).build()
+        )
+    val keysAndAttributes = KeysAndAttributes
+      .builder()
+      .keys(keys.map(_.asJava).asJava)
+      .build()
+    val input = Map("table1" -> keysAndAttributes, "table2" -> keysAndAttributes).asJava
+    val request =
+      BatchGetItemRequest
+        .builder()
+        .requestItems(input)
+        .build()
+    val future = streamClientForScalaCompat.batchGetItemSource(request).runWith(Sink.seq)
+    Await.result(future, Duration.Inf)
+  }
+
+  @Benchmark
+  def batchGetItem_multi_akka_jdkFlow(): Unit = {
+    implicit val s = system
+    val keys =
+      for (i <- 1 to batchGetItemTotalSize)
+        yield Map(
+          "pkey" -> AttributeValue.builder().s(s"batch-get-item-$i").build(),
+          "skey" -> AttributeValue.builder().s(i.toString).build()
+        )
+    val keysAndAttributes = KeysAndAttributes
+      .builder()
+      .keys(keys.map(_.asJava).asJava)
+      .build()
+    val input = Map("table1" -> keysAndAttributes, "table2" -> keysAndAttributes).asJava
+    val request =
+      BatchGetItemRequest
+        .builder()
+        .requestItems(input)
+        .build()
+    val future = streamClientForScalaJDK.batchGetItemSource(request).runWith(Sink.seq)
+    Await.result(future, Duration.Inf)
+  }
+
+  @Benchmark
+  def batchWriteItem_multi_javaClient(): Unit = {
+    val requestItems =
+      (for (i <- 1 to batchWriteItemTotalSize)
+        yield createWriteRequest(s"client-batch-write-item-multi-$i", i)).toList
+    val input = Map("table1" -> requestItems, "table2" -> requestItems)
+    def loop(
+        map: Map[String, List[WriteRequest]],
+        future: CompletableFuture[Unit]
+    ): CompletableFuture[Unit] = {
+      map.filterNot { case (_, v) => v.isEmpty } match {
+        case m if m.isEmpty => future
+        case l =>
+          val nm = l.map {
+            case (key, values) =>
+              val (h, t) =
+                values.splitAt(DynamoDBStreamClient.BatchWriteItemMaxSize / l.keys.size)
+              (key, (h, t))
+          }
+          val ri = nm.map { case (k, v) => (k, v._1.asJava) }.asJava
+          val t  = nm.map { case (k, v) => (k, v._2) }
+          val f: CompletableFuture[Unit] = client
+            .batchWriteItem(
+              BatchWriteItemRequest
+                .builder()
+                .requestItems(ri)
+                .build()
+            )
+            .thenApply(_ => ())
+          loop(t, future.thenCompose(_ => f))
+      }
+    }
+    loop(input, CompletableFuture.completedFuture(())).join()
+  }
+
+  @Benchmark
+  def batchWriteItem_multi_akka_javaFlow(): Unit = {
+    implicit val s = system
+    val requestItems =
+      (for (i <- 1 to batchWriteItemTotalSize)
+        yield createWriteRequest(s"stream-batch-write-item-multi-$i", i))
+    val input = Map("table1" -> requestItems.asJava, "table2" -> requestItems.asJava).asJava
+    val future = streamClientForJava
+      .batchWriteItemSource(
+        BatchWriteItemRequest
+          .builder()
+          .requestItems(input)
+          .build()
+      )
+      .runWith(Sink.seq)
+    Await.result(future, Duration.Inf)
+  }
+
+  @Benchmark
+  def batchWriteItem_multi_akka_compatFlow(): Unit = {
+    implicit val s = system
+    val requestItems =
+      (for (i <- 1 to batchWriteItemTotalSize)
+        yield createWriteRequest(s"stream-batch-write-item-multi-$i", i))
+    val input = Map("table1" -> requestItems.asJava, "table2" -> requestItems.asJava).asJava
+    val future = streamClientForScalaCompat
+      .batchWriteItemSource(
+        BatchWriteItemRequest
+          .builder()
+          .requestItems(input)
+          .build()
+      )
+      .runWith(Sink.seq)
+    Await.result(future, Duration.Inf)
+  }
+
+  @Benchmark
+  def batchWriteItem_multi_akka_jdkFlow(): Unit = {
+    implicit val s = system
+    val requestItems =
+      (for (i <- 1 to batchWriteItemTotalSize)
+        yield createWriteRequest(s"stream-batch-write-item-multi-$i", i))
+    val input = Map("table1" -> requestItems.asJava, "table2" -> requestItems.asJava).asJava
+    val future = streamClientForScalaJDK
+      .batchWriteItemSource(
+        BatchWriteItemRequest
+          .builder()
+          .requestItems(input)
+          .build()
+      )
+      .runWith(Sink.seq)
+    Await.result(future, Duration.Inf)
+  }
+}
+
 @State(Scope.Benchmark)
 @BenchmarkMode(Array(Mode.SampleTime))
 @OutputTimeUnit(TimeUnit.MILLISECONDS)
@@ -172,52 +401,6 @@ class DynamoDBBenchmark extends DynamoDBContainerHelper {
   }
 
   @Benchmark
-  def batchGetItem_multi_javaClient(): Unit = {
-    val keys: List[Map[String, AttributeValue]] =
-      (for (i <- 1 to batchGetItemTotalSize)
-        yield Map(
-          "pkey" -> AttributeValue.builder().s(s"batch-get-item-$i").build(),
-          "skey" -> AttributeValue.builder().s(i.toString).build()
-        )).toList
-    val input = Map("table1" -> keys, "table2" -> keys)
-    def loop(
-        map: Map[String, List[Map[String, AttributeValue]]],
-        future: CompletableFuture[Unit]
-    ): CompletableFuture[Unit] = {
-      map.filterNot { case (_, v) => v.isEmpty } match {
-        case m if m.isEmpty => future
-        case l =>
-          val nm = l.map {
-            case (key, values) =>
-              val (h, t) =
-                values.splitAt(DynamoDBStreamClient.BatchGetItemMaxSize / l.keys.size)
-              key -> (h, t)
-          }
-          val ri = nm.map {
-            case (k, (v, _)) =>
-              val nv = KeysAndAttributes
-                .builder()
-                .keys(v.map(_.asJava).asJava)
-                .build()
-              (k, nv)
-          }.asJava
-          val t = nm.map { case (k, (_, v)) => (k, v) }
-          val request =
-            BatchGetItemRequest
-              .builder()
-              .requestItems(ri)
-              .build()
-          val f: CompletableFuture[Unit] = client
-            .batchGetItem(request)
-            .thenApply(_ => ())
-          future.thenCompose(_ => f)
-          loop(t, f)
-      }
-    }
-    loop(input, CompletableFuture.completedFuture(())).join()
-  }
-
-  @Benchmark
   def batchGetItem_single_akka_javaFlow(): Unit = {
     implicit val s = system
     val keys =
@@ -306,98 +489,6 @@ class DynamoDBBenchmark extends DynamoDBContainerHelper {
   }
 
   @Benchmark
-  def batchGetItem_multi_akka_javaFlow(): Unit = {
-    implicit val s = system
-    val keys =
-      for (i <- 1 to batchGetItemTotalSize)
-        yield Map(
-          "pkey" -> AttributeValue.builder().s(s"batch-get-item-$i").build(),
-          "skey" -> AttributeValue.builder().s(i.toString).build()
-        )
-    val keysAndAttributes = KeysAndAttributes
-      .builder()
-      .keys(keys.map(_.asJava).asJava)
-      .build()
-    val input = Map("table1" -> keysAndAttributes, "table2" -> keysAndAttributes).asJava
-    val request =
-      BatchGetItemRequest
-        .builder()
-        .requestItems(input)
-        .build()
-    val future = streamClientForJava.batchGetItemSource(request).runWith(Sink.seq)
-    Await.result(future, Duration.Inf)
-  }
-
-  @Benchmark
-  def batchGetItem_multi_akka_javaFlow_publisher(): Unit = {
-    implicit val s = system
-    val keys =
-      for (i <- 1 to batchGetItemTotalSize)
-        yield Map(
-          "pkey" -> AttributeValue.builder().s(s"batch-get-item-$i").build(),
-          "skey" -> AttributeValue.builder().s(i.toString).build()
-        )
-    val keysAndAttributes = KeysAndAttributes
-      .builder()
-      .keys(keys.map(_.asJava).asJava)
-      .build()
-    val input = Map("table1" -> keysAndAttributes, "table2" -> keysAndAttributes).asJava
-    val request =
-      BatchGetItemRequest
-        .builder()
-        .requestItems(input)
-        .build()
-    val future = streamClientForJavaWithPublisher.batchGetItemSource(request).runWith(Sink.seq)
-    Await.result(future, Duration.Inf)
-  }
-
-  @Benchmark
-  def batchGetItem_multi_akka_compatFlow(): Unit = {
-    implicit val s = system
-    val keys =
-      for (i <- 1 to batchGetItemTotalSize)
-        yield Map(
-          "pkey" -> AttributeValue.builder().s(s"batch-get-item-$i").build(),
-          "skey" -> AttributeValue.builder().s(i.toString).build()
-        )
-    val keysAndAttributes = KeysAndAttributes
-      .builder()
-      .keys(keys.map(_.asJava).asJava)
-      .build()
-    val input = Map("table1" -> keysAndAttributes, "table2" -> keysAndAttributes).asJava
-    val request =
-      BatchGetItemRequest
-        .builder()
-        .requestItems(input)
-        .build()
-    val future = streamClientForScalaCompat.batchGetItemSource(request).runWith(Sink.seq)
-    Await.result(future, Duration.Inf)
-  }
-
-  @Benchmark
-  def batchGetItem_multi_akka_jdkFlow(): Unit = {
-    implicit val s = system
-    val keys =
-      for (i <- 1 to batchGetItemTotalSize)
-        yield Map(
-          "pkey" -> AttributeValue.builder().s(s"batch-get-item-$i").build(),
-          "skey" -> AttributeValue.builder().s(i.toString).build()
-        )
-    val keysAndAttributes = KeysAndAttributes
-      .builder()
-      .keys(keys.map(_.asJava).asJava)
-      .build()
-    val input = Map("table1" -> keysAndAttributes, "table2" -> keysAndAttributes).asJava
-    val request =
-      BatchGetItemRequest
-        .builder()
-        .requestItems(input)
-        .build()
-    val future = streamClientForScalaJDK.batchGetItemSource(request).runWith(Sink.seq)
-    Await.result(future, Duration.Inf)
-  }
-
-  @Benchmark
   def batchWriteItem_single_javaClient(): Unit = {
     val requestItems =
       (for (i <- 1 to batchWriteItemTotalSize)
@@ -451,24 +542,6 @@ class DynamoDBBenchmark extends DynamoDBContainerHelper {
   }
 
   @Benchmark
-  def batchWriteItem_single_akka_javaFlow_publisher(): Unit = {
-    implicit val s = system
-    val requestItems =
-      (for (i <- 1 to batchWriteItemTotalSize)
-        yield createWriteRequest(s"stream-batch-write-item-single-$i", i))
-    val input = Map("table1" -> requestItems.asJava).asJava
-    val future = streamClientForJavaWithPublisher
-      .batchWriteItemSource(
-        BatchWriteItemRequest
-          .builder()
-          .requestItems(input)
-          .build()
-      )
-      .runWith(Sink.seq)
-    Await.result(future, Duration.Inf)
-  }
-
-  @Benchmark
   def batchWriteItem_single_akka_compatFlow(): Unit = {
     implicit val s = system
     val requestItems =
@@ -493,113 +566,6 @@ class DynamoDBBenchmark extends DynamoDBContainerHelper {
       (for (i <- 1 to batchWriteItemTotalSize)
         yield createWriteRequest(s"stream-batch-write-item-single-$i", i))
     val input = Map("table1" -> requestItems.asJava).asJava
-    val future = streamClientForScalaJDK
-      .batchWriteItemSource(
-        BatchWriteItemRequest
-          .builder()
-          .requestItems(input)
-          .build()
-      )
-      .runWith(Sink.seq)
-    Await.result(future, Duration.Inf)
-  }
-
-  @Benchmark
-  def batchWriteItem_multi_javaClient(): Unit = {
-    val requestItems =
-      (for (i <- 1 to batchWriteItemTotalSize)
-        yield createWriteRequest(s"client-batch-write-item-multi-$i", i)).toList
-    val input = Map("table1" -> requestItems, "table2" -> requestItems)
-    def loop(
-        map: Map[String, List[WriteRequest]],
-        future: CompletableFuture[Unit]
-    ): CompletableFuture[Unit] = {
-      map.filterNot { case (_, v) => v.isEmpty } match {
-        case m if m.isEmpty => future
-        case l =>
-          val nm = l.map {
-            case (key, values) =>
-              val (h, t) =
-                values.splitAt(DynamoDBStreamClient.BatchWriteItemMaxSize / l.keys.size)
-              (key, (h, t))
-          }
-          val ri = nm.map { case (k, v) => (k, v._1.asJava) }.asJava
-          val t  = nm.map { case (k, v) => (k, v._2) }
-          val f: CompletableFuture[Unit] = client
-            .batchWriteItem(
-              BatchWriteItemRequest
-                .builder()
-                .requestItems(ri)
-                .build()
-            )
-            .thenApply(_ => ())
-          loop(t, future.thenCompose(_ => f))
-      }
-    }
-    loop(input, CompletableFuture.completedFuture(())).join()
-  }
-
-  @Benchmark
-  def batchWriteItem_multi_akka_javaFlow(): Unit = {
-    implicit val s = system
-    val requestItems =
-      (for (i <- 1 to batchWriteItemTotalSize)
-        yield createWriteRequest(s"stream-batch-write-item-multi-$i", i))
-    val input = Map("table1" -> requestItems.asJava, "table2" -> requestItems.asJava).asJava
-    val future = streamClientForJava
-      .batchWriteItemSource(
-        BatchWriteItemRequest
-          .builder()
-          .requestItems(input)
-          .build()
-      )
-      .runWith(Sink.seq)
-    Await.result(future, Duration.Inf)
-  }
-
-  @Benchmark
-  def batchWriteItem_multi_akka_javaFlow_publisher(): Unit = {
-    implicit val s = system
-    val requestItems =
-      (for (i <- 1 to batchWriteItemTotalSize)
-        yield createWriteRequest(s"stream-batch-write-item-multi-$i", i))
-    val input = Map("table1" -> requestItems.asJava, "table2" -> requestItems.asJava).asJava
-    val future = streamClientForJavaWithPublisher
-      .batchWriteItemSource(
-        BatchWriteItemRequest
-          .builder()
-          .requestItems(input)
-          .build()
-      )
-      .runWith(Sink.seq)
-    Await.result(future, Duration.Inf)
-  }
-
-  @Benchmark
-  def batchWriteItem_multi_akka_compatFlow(): Unit = {
-    implicit val s = system
-    val requestItems =
-      (for (i <- 1 to batchWriteItemTotalSize)
-        yield createWriteRequest(s"stream-batch-write-item-multi-$i", i))
-    val input = Map("table1" -> requestItems.asJava, "table2" -> requestItems.asJava).asJava
-    val future = streamClientForScalaCompat
-      .batchWriteItemSource(
-        BatchWriteItemRequest
-          .builder()
-          .requestItems(input)
-          .build()
-      )
-      .runWith(Sink.seq)
-    Await.result(future, Duration.Inf)
-  }
-
-  @Benchmark
-  def batchWriteItem_multi_akka_jdkFlow(): Unit = {
-    implicit val s = system
-    val requestItems =
-      (for (i <- 1 to batchWriteItemTotalSize)
-        yield createWriteRequest(s"stream-batch-write-item-multi-$i", i))
-    val input = Map("table1" -> requestItems.asJava, "table2" -> requestItems.asJava).asJava
     val future = streamClientForScalaJDK
       .batchWriteItemSource(
         BatchWriteItemRequest
